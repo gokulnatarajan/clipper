@@ -40,9 +40,12 @@ def _update(job_id: str, **kwargs):
 
 
 def _extract_rms(video_path: str, chunk_dur: float = 2.0):
-    """Pipe mono 16 kHz PCM from ffmpeg into numpy and return RMS per chunk."""
+    """Stream mono 16 kHz PCM from ffmpeg and return RMS per chunk."""
     sr = 16_000
-    proc = subprocess.run(
+    chunk_samples = int(sr * chunk_dur)
+    chunk_bytes = chunk_samples * 4  # f32le = 4 bytes per sample
+
+    proc = subprocess.Popen(
         [
             "ffmpeg", "-i", video_path,
             "-vn", "-ac", "1", "-ar", str(sr),
@@ -51,14 +54,21 @@ def _extract_rms(video_path: str, chunk_dur: float = 2.0):
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
-    audio = np.frombuffer(proc.stdout, dtype=np.float32)
-    chunk = int(sr * chunk_dur)
-    n = len(audio) // chunk
-    if n == 0:
-        return np.array([], dtype=np.float32), chunk_dur
-    blocks = audio[: n * chunk].reshape(n, chunk)
-    rms = np.sqrt(np.mean(blocks**2, axis=1))
-    return rms, chunk_dur
+
+    rms_list = []
+    buf = b""
+    while True:
+        data = proc.stdout.read(chunk_bytes * 8)
+        if not data:
+            break
+        buf += data
+        while len(buf) >= chunk_bytes:
+            chunk = np.frombuffer(buf[:chunk_bytes], dtype=np.float32)
+            buf = buf[chunk_bytes:]
+            rms_list.append(float(np.sqrt(np.mean(chunk ** 2))))
+    proc.wait()
+
+    return np.array(rms_list, dtype=np.float32), chunk_dur
 
 
 def _detect_highlights(rms: np.ndarray, chunk_dur: float, clip_length: int, top_n: int):
